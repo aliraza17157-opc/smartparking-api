@@ -41,7 +41,7 @@ public class ParkingController {
         }
     }
 
-    // PARK VEHICLE - Auto assign slot
+    // PARK VEHICLE - Auto assign slot + reserved check
     @PostMapping("/park")
     public ResponseEntity<?> park(@RequestBody Map<String, String> body) {
         try {
@@ -56,14 +56,22 @@ public class ParkingController {
                 occupiedSlots.add(occupiedRs.getString("slot_id"));
             }
 
-            // Auto assign slot based on vehicle type
+            // Get all reserved slots
+            ResultSet reservedRs = conn.createStatement().executeQuery(
+                    "SELECT slot_id FROM reserved_slots");
+            Set<String> reservedSlots = new HashSet<>();
+            while (reservedRs.next()) {
+                reservedSlots.add(reservedRs.getString("slot_id"));
+            }
+
+            // Auto assign slot based on vehicle type — skip occupied AND reserved
             String prefix = vehicleType.equals("BIKE") ? "B-" : vehicleType.equals("TRUCK") ? "T-" : "C-";
             int maxSlots = vehicleType.equals("BIKE") ? 50 : vehicleType.equals("TRUCK") ? 25 : 30;
 
             String assignedSlot = null;
             for (int i = 1; i <= maxSlots; i++) {
                 String slotId = String.format("%s%02d", prefix, i);
-                if (!occupiedSlots.contains(slotId)) {
+                if (!occupiedSlots.contains(slotId) && !reservedSlots.contains(slotId)) {
                     assignedSlot = slotId;
                     break;
                 }
@@ -87,7 +95,7 @@ public class ParkingController {
             Map<String, String> res = new HashMap<>();
             res.put("ticket_id", ticketId);
             res.put("slot_id", assignedSlot);
-            res.put("message", "Parked Successfully!");
+            res.put("message", "Parked Successfully! Slot: " + assignedSlot);
             return ResponseEntity.ok(res);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(e.getMessage());
@@ -229,14 +237,21 @@ public class ParkingController {
             if (revenue.next()) stats.put("todayRevenue", revenue.getDouble("total"));
             ResultSet totalVehicles = conn.createStatement().executeQuery("SELECT COUNT(*) as count FROM ticket_history");
             if (totalVehicles.next()) stats.put("totalVehicles", totalVehicles.getInt("count"));
-            stats.put("availableSlots", 105);
+
+            // Available slots = 105 - occupied - reserved
+            ResultSet occupiedCount = conn.createStatement().executeQuery("SELECT COUNT(*) as count FROM active_tickets");
+            int occupied = occupiedCount.next() ? occupiedCount.getInt("count") : 0;
+            ResultSet reservedCount = conn.createStatement().executeQuery("SELECT COUNT(*) as count FROM reserved_slots");
+            int reserved = reservedCount.next() ? reservedCount.getInt("count") : 0;
+            stats.put("availableSlots", 105 - occupied - reserved);
+
             return ResponseEntity.ok(stats);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(e.getMessage());
         }
     }
 
-    // RECENT ACTIVITY - Entry + Exit
+    // RECENT ACTIVITY
     @GetMapping("/tickets/recent")
     public ResponseEntity<?> getRecentTickets() {
         try {
@@ -277,40 +292,47 @@ public class ParkingController {
         }
     }
 
-    // SLOT STATUS
+    // SLOT STATUS - with reserved info
     @GetMapping("/slots/status")
     public ResponseEntity<?> getSlotsStatus() {
         try {
             Connection conn = getConn();
-            ResultSet rs = conn.createStatement().executeQuery("SELECT slot_id FROM active_tickets");
+
+            ResultSet occupiedRs = conn.createStatement().executeQuery("SELECT slot_id FROM active_tickets");
             Set<String> occupied = new HashSet<>();
-            while (rs.next()) occupied.add(rs.getString("slot_id"));
+            while (occupiedRs.next()) occupied.add(occupiedRs.getString("slot_id"));
+
+            ResultSet reservedRs = conn.createStatement().executeQuery("SELECT slot_id FROM reserved_slots");
+            Set<String> reserved = new HashSet<>();
+            while (reservedRs.next()) reserved.add(reservedRs.getString("slot_id"));
 
             List<Map<String, Object>> slots = new ArrayList<>();
+
             for (int i = 1; i <= 30; i++) {
                 String id = String.format("C-%02d", i);
                 Map<String, Object> s = new HashMap<>();
                 s.put("slot_id", id); s.put("type", "CAR");
-                s.put("status", occupied.contains(id) ? "OCCUPIED" : "FREE");
                 s.put("floor", i <= 10 ? 1 : i <= 20 ? 2 : 3);
+                s.put("status", occupied.contains(id) ? "OCCUPIED" : reserved.contains(id) ? "RESERVED" : "FREE");
                 slots.add(s);
             }
             for (int i = 1; i <= 50; i++) {
                 String id = String.format("B-%02d", i);
                 Map<String, Object> s = new HashMap<>();
                 s.put("slot_id", id); s.put("type", "BIKE");
-                s.put("status", occupied.contains(id) ? "OCCUPIED" : "FREE");
                 s.put("floor", i <= 17 ? 1 : i <= 34 ? 2 : 3);
+                s.put("status", occupied.contains(id) ? "OCCUPIED" : reserved.contains(id) ? "RESERVED" : "FREE");
                 slots.add(s);
             }
             for (int i = 1; i <= 25; i++) {
                 String id = String.format("T-%02d", i);
                 Map<String, Object> s = new HashMap<>();
                 s.put("slot_id", id); s.put("type", "TRUCK");
-                s.put("status", occupied.contains(id) ? "OCCUPIED" : "FREE");
                 s.put("floor", i <= 9 ? 1 : i <= 17 ? 2 : 3);
+                s.put("status", occupied.contains(id) ? "OCCUPIED" : reserved.contains(id) ? "RESERVED" : "FREE");
                 slots.add(s);
             }
+
             return ResponseEntity.ok(slots);
         } catch (Exception e) {
             return ResponseEntity.status(500).body(e.getMessage());
@@ -339,14 +361,36 @@ public class ParkingController {
         }
     }
 
-    // RESERVE SLOT
+    // RESERVE SLOT - with duplicate check
     @PostMapping("/reserve")
     public ResponseEntity<?> reserveSlot(@RequestBody Map<String, String> body) {
         try {
             Connection conn = getConn();
-            String sql = "INSERT INTO reserved_slots (slot_id, reserved_by, reserved_phone, reserved_time) VALUES (?, ?, ?, NOW())";
-            PreparedStatement ps = conn.prepareStatement(sql);
-            ps.setString(1, body.get("slot_id"));
+            String slotId = body.get("slot_id");
+
+            // Check already reserved
+            PreparedStatement checkRes = conn.prepareStatement(
+                    "SELECT COUNT(*) FROM reserved_slots WHERE slot_id=?");
+            checkRes.setString(1, slotId);
+            ResultSet r1 = checkRes.executeQuery();
+            r1.next();
+            if (r1.getInt(1) > 0) {
+                return ResponseEntity.status(400).body("Slot " + slotId + " is already reserved!");
+            }
+
+            // Check already occupied
+            PreparedStatement checkOcc = conn.prepareStatement(
+                    "SELECT COUNT(*) FROM active_tickets WHERE slot_id=?");
+            checkOcc.setString(1, slotId);
+            ResultSet r2 = checkOcc.executeQuery();
+            r2.next();
+            if (r2.getInt(1) > 0) {
+                return ResponseEntity.status(400).body("Slot " + slotId + " is currently occupied!");
+            }
+
+            PreparedStatement ps = conn.prepareStatement(
+                    "INSERT INTO reserved_slots (slot_id, reserved_by, reserved_phone, reserved_time) VALUES (?, ?, ?, NOW())");
+            ps.setString(1, slotId);
             ps.setString(2, body.get("reserved_by"));
             ps.setString(3, body.get("reserved_phone"));
             ps.executeUpdate();
