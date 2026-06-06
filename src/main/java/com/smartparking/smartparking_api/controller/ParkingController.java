@@ -9,10 +9,9 @@ import java.util.*;
 @CrossOrigin(origins = "*")
 public class ParkingController {
 
-    private static final String URL = "jdbc:mysql://localhost:3306/smartparkingdb";
+    private static final String URL = "jdbc:mysql://acela.proxy.rlwy.net:57838/railway";
     private static final String USER = "root";
-    private static final String PASSWORD = "aliadmin1234";
-
+    private static final String PASSWORD = "gMPihRDweqeHdTNBRcSyobucjMvkfSzn";
     private Connection getConn() throws SQLException {
         Connection conn = DriverManager.getConnection(URL, USER, PASSWORD);
         conn.createStatement().executeUpdate("SET SQL_SAFE_UPDATES = 0");
